@@ -1,6 +1,14 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import os
+import warnings
+
+# Suppress warnings before loading heavy libraries
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow C++ logs (0=DEBUG, 1=INFO, 2=WARNING, 3=ERROR)
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0' # Suppress oneDNN warning
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Depends, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
 from starlette.middleware.cors import CORSMiddleware
@@ -1817,10 +1825,8 @@ async def register_face(data: FaceRegister, user: dict = Depends(get_current_use
 
         # Physically save the image to "face recognition photos" directory so it persists in git / deployments!
         try:
-            photos_dir = r"c:\Users\Varun\OneDrive\Dokumen\AI portfolio\face recognition photos"
-            if not os.path.exists(photos_dir):
-                backend_parent = os.path.dirname(os.path.abspath(__file__))
-                photos_dir = os.path.join(os.path.dirname(backend_parent), "face recognition photos")
+            # Look for the face recognition photos folder in the same directory as server.py
+            photos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face recognition photos")
             
             if os.path.exists(photos_dir):
                 file_path = os.path.join(photos_dir, "webcam_registration.jpeg")
@@ -2091,10 +2097,8 @@ async def seed_admin_face_embeddings(admin_id: str):
     logger.info("Starting admin face recognition embeddings seeding...")
     try:
         from deepface import DeepFace
-        photos_dir = r"c:\Users\Varun\OneDrive\Dokumen\AI portfolio\face recognition photos"
-        if not os.path.exists(photos_dir):
-            backend_parent = os.path.dirname(os.path.abspath(__file__))
-            photos_dir = os.path.join(os.path.dirname(backend_parent), "face recognition photos")
+        # Look for the face recognition photos folder in the same directory as server.py
+        photos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face recognition photos")
             
         if not os.path.exists(photos_dir):
             logger.warning(f"Admin photos directory not found at {photos_dir}. Skipping face embedding seeding.")
