@@ -1947,9 +1947,10 @@ async def face_login(data: FaceRegister):
                 best_distance = cosine_distance
                 matching_template = template
 
-        # VGG-Face recommended threshold for cosine distance is 0.40.
-        # If best distance is below 0.40, we have a match!
-        THRESHOLD = 0.40
+        # Facenet recommended threshold for cosine distance is 0.40,
+        # but webcam captures have more variation than reference photos.
+        # Using 0.55 to allow for lighting/angle differences while still being secure.
+        THRESHOLD = 0.55
         if matching_template and best_distance < THRESHOLD:
             matched_user_id = matching_template["user_id"]
             user = await db.users.find_one({"_id": ObjectId(matched_user_id)})
@@ -2084,76 +2085,84 @@ async def health_check():
 app.include_router(api_router)
 
 # CORS Configuration
-frontend_url = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:3000')
+cors_origins_str = os.environ.get('CORS_ORIGINS', 'http://localhost:3000')
+if cors_origins_str == "*":
+    cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8000"]
+else:
+    cors_origins = [o.strip() for o in cors_origins_str.split(",") if o.strip()]
+    # Always include localhost for local dev
+    for origin in ["http://localhost:3000", "http://127.0.0.1:3000"]:
+        if origin not in cors_origins:
+            cors_origins.append(origin)
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=[frontend_url, "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-async def seed_admin_face_embeddings(admin_id: str):
-    logger.info("Starting admin face recognition embeddings seeding...")
+async def seed_face_embeddings_for_user(user_id: str, folder_name: str):
+    """Seed face embeddings for a specific user from a specific folder."""
+    logger.info(f"Checking face embeddings for user {user_id} from folder '{folder_name}'...")
     try:
-        # Check if embeddings are already seeded to prevent blocking startup loops in deployment
-        existing_count = await db.face_embeddings.count_documents({"user_id": admin_id})
+        # Check if embeddings already exist for this user + folder combo
+        existing_count = await db.face_embeddings.count_documents({
+            "user_id": user_id, 
+            "filename": {"$regex": f"^{folder_name}_"}
+        })
         if existing_count > 0:
-            logger.info(f"Admin face embeddings already seeded ({existing_count} found). Skipping seeding to prevent startup delays.")
+            logger.info(f"Embeddings for '{folder_name}' already seeded ({existing_count} found). Skipping.")
             return
 
         from deepface import DeepFace
 
-        directories_to_scan = ["Face 1", "Face 2"]
         supported_extensions = {".jpg", ".jpeg", ".png", ".webp"}
-        seeded_count = 0
-
-        for folder_name in directories_to_scan:
-            photos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), folder_name)
-                
-            if not os.path.exists(photos_dir):
-                logger.warning(f"Admin photos directory not found at {photos_dir}. Skipping.")
-                continue
-
-            files = [f for f in os.listdir(photos_dir) if os.path.splitext(f.lower())[1] in supported_extensions]
+        photos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), folder_name)
             
-            if not files:
-                logger.warning(f"No face images found in {photos_dir}.")
-                continue
+        if not os.path.exists(photos_dir):
+            logger.warning(f"Photos directory not found at {photos_dir}. Skipping.")
+            return
 
-            for filename in files:
-                file_path = os.path.join(photos_dir, filename)
+        files = [f for f in os.listdir(photos_dir) if os.path.splitext(f.lower())[1] in supported_extensions]
+        
+        if not files:
+            logger.warning(f"No face images found in {photos_dir}.")
+            return
+
+        seeded_count = 0
+        for filename in files:
+            file_path = os.path.join(photos_dir, filename)
+            
+            logger.info(f"Computing face embedding for reference image: {folder_name}/{filename}...")
+            try:
+                objs = DeepFace.represent(img_path=file_path, model_name='Facenet', enforce_detection=False)
+                if not objs or len(objs) == 0:
+                    logger.warning(f"Could not extract face representation from {folder_name}/{filename}.")
+                    continue
                 
-                logger.info(f"Computing face embedding for reference image: {folder_name}/{filename}...")
-                try:
-                    # Represent returns a list of dicts, each with 'embedding' key
-                    objs = DeepFace.represent(img_path=file_path, model_name='Facenet', enforce_detection=False)
-                    if not objs or len(objs) == 0:
-                        logger.warning(f"Could not extract face representation from {folder_name}/{filename}.")
-                        continue
-                    
-                    embedding = objs[0]["embedding"]
-                    # Use folder_name + filename to ensure uniqueness if filenames overlap
-                    unique_filename = f"{folder_name}_{filename}"
-                    await db.face_embeddings.update_one(
-                        {"user_id": admin_id, "filename": unique_filename, "model_name": "Facenet"},
-                        {"$set": {
-                            "user_id": admin_id,
-                            "filename": unique_filename,
-                            "embedding": embedding,
-                            "model_name": "Facenet",
-                            "created_at": datetime.now(timezone.utc).isoformat()
-                        }},
-                        upsert=True
-                    )
-                    seeded_count += 1
-                    logger.info(f"Successfully seeded embedding for {folder_name}/{filename}.")
-                except Exception as e:
-                    logger.error(f"Error computing embedding for {folder_name}/{filename}: {str(e)}")
-                    
-        logger.info(f"Finished seeding admin face embeddings. Total newly seeded: {seeded_count}")
+                embedding = objs[0]["embedding"]
+                unique_filename = f"{folder_name}_{filename}"
+                await db.face_embeddings.update_one(
+                    {"user_id": user_id, "filename": unique_filename, "model_name": "Facenet"},
+                    {"$set": {
+                        "user_id": user_id,
+                        "filename": unique_filename,
+                        "embedding": embedding,
+                        "model_name": "Facenet",
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    }},
+                    upsert=True
+                )
+                seeded_count += 1
+                logger.info(f"Successfully seeded embedding for {folder_name}/{filename}.")
+            except Exception as e:
+                logger.error(f"Error computing embedding for {folder_name}/{filename}: {str(e)}")
+                
+        logger.info(f"Finished seeding embeddings for '{folder_name}'. Total: {seeded_count}")
     except Exception as e:
-        logger.error(f"Failed to seed admin face embeddings: {str(e)}")
+        logger.error(f"Failed to seed face embeddings for '{folder_name}': {str(e)}")
 
 # Startup event - Seed admin
 @app.on_event("startup")
@@ -2177,43 +2186,73 @@ async def startup_event():
     await seed_default_home_info()
     await seed_default_projects()
     
-    # Seed admin user
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@varunportfolio.com")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "VarunAdmin@2026")
+    # ===== Seed Face 1 admin user =====
+    admin1_email = os.environ.get("ADMIN_EMAIL", "admin@varunportfolio.com")
+    admin1_password = os.environ.get("ADMIN_PASSWORD", "VarunAdmin@2026")
     
-    existing = await db.users.find_one({"email": admin_email})
-    if not existing:
-        admin_doc = {
-            "email": admin_email,
-            "password_hash": hash_password(admin_password),
+    existing1 = await db.users.find_one({"email": admin1_email})
+    if not existing1:
+        admin1_doc = {
+            "email": admin1_email,
+            "password_hash": hash_password(admin1_password),
             "name": "Varun (Admin)",
             "role": "admin",
             "created_at": datetime.now(timezone.utc).isoformat()
         }
-        result = await db.users.insert_one(admin_doc)
-        admin_id = str(result.inserted_id)
-        logger.info(f"Admin user created: {admin_email}")
+        result = await db.users.insert_one(admin1_doc)
+        admin1_id = str(result.inserted_id)
+        logger.info(f"Admin user 1 (Face 1) created: {admin1_email}")
     else:
-        admin_id = str(existing["_id"])
-        # Update password if changed
-        if not verify_password(admin_password, existing["password_hash"]):
+        admin1_id = str(existing1["_id"])
+        if not verify_password(admin1_password, existing1["password_hash"]):
             await db.users.update_one(
-                {"email": admin_email},
-                {"$set": {"password_hash": hash_password(admin_password)}}
+                {"email": admin1_email},
+                {"$set": {"password_hash": hash_password(admin1_password)}}
             )
-            logger.info("Admin password updated")
+            logger.info("Admin 1 password updated")
 
-    # Seed face recognition embeddings for admin from reference photos
-    await seed_admin_face_embeddings(admin_id)
+    # ===== Seed Face 2 admin user =====
+    admin2_email = os.environ.get("ADMIN2_EMAIL", "admin2@varunportfolio.com")
+    admin2_password = os.environ.get("ADMIN2_PASSWORD", "VarunAdmin2@2026")
+    
+    existing2 = await db.users.find_one({"email": admin2_email})
+    if not existing2:
+        admin2_doc = {
+            "email": admin2_email,
+            "password_hash": hash_password(admin2_password),
+            "name": "Admin 2",
+            "role": "admin",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        result = await db.users.insert_one(admin2_doc)
+        admin2_id = str(result.inserted_id)
+        logger.info(f"Admin user 2 (Face 2) created: {admin2_email}")
+    else:
+        admin2_id = str(existing2["_id"])
+        if not verify_password(admin2_password, existing2["password_hash"]):
+            await db.users.update_one(
+                {"email": admin2_email},
+                {"$set": {"password_hash": hash_password(admin2_password)}}
+            )
+            logger.info("Admin 2 password updated")
+
+    # Seed face recognition embeddings — each person gets their own user account
+    await seed_face_embeddings_for_user(admin1_id, "Face 1")
+    await seed_face_embeddings_for_user(admin2_id, "Face 2")
     
     # Write test credentials
     os.makedirs(MEMORY_DIR, exist_ok=True)
     credentials_path = os.path.join(MEMORY_DIR, "test_credentials.md")
     credentials_content = f"""# Test Credentials
 
-## Admin Account
-- Email: {admin_email}
-- Password: {admin_password}
+## Admin Account 1 (Face 1)
+- Email: {admin1_email}
+- Password: {admin1_password}
+- Role: admin
+
+## Admin Account 2 (Face 2)
+- Email: {admin2_email}
+- Password: {admin2_password}
 - Role: admin
 
 ## Auth Endpoints
@@ -2237,5 +2276,5 @@ async def shutdown_db_client():
 import uvicorn
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
