@@ -1802,7 +1802,7 @@ async def register_face(data: FaceRegister, user: dict = Depends(get_current_use
             
         try:
             from deepface import DeepFace
-            objs = DeepFace.represent(img_path=img, model_name='VGG-Face', enforce_detection=False)
+            objs = DeepFace.represent(img_path=img, model_name='Facenet', enforce_detection=False)
             if not objs or len(objs) == 0:
                 raise HTTPException(status_code=400, detail="No face or embedding could be extracted from registration image")
             embedding = objs[0]["embedding"]
@@ -1812,12 +1812,12 @@ async def register_face(data: FaceRegister, user: dict = Depends(get_current_use
             
         # Store face data
         await db.face_embeddings.update_one(
-            {"user_id": user["_id"], "model_name": "VGG-Face", "filename": "webcam_registration.jpeg"},
+            {"user_id": user["_id"], "model_name": "Facenet", "filename": "webcam_registration.jpeg"},
             {"$set": {
                 "user_id": user["_id"],
                 "filename": "webcam_registration.jpeg",
                 "embedding": embedding,
-                "model_name": "VGG-Face",
+                "model_name": "Facenet",
                 "created_at": datetime.now(timezone.utc).isoformat()
             }},
             upsert=True
@@ -1908,7 +1908,7 @@ async def face_login(data: FaceRegister):
         # Extract VGG-Face embedding for captured image
         try:
             logger.info("Extracting VGG-Face embedding for login capture...")
-            objs = DeepFace.represent(img_path=img, model_name='VGG-Face', enforce_detection=False)
+            objs = DeepFace.represent(img_path=img, model_name='Facenet', enforce_detection=False)
             if not objs or len(objs) == 0:
                 raise HTTPException(status_code=400, detail="No face or embedding could be extracted from webcam capture")
             captured_embedding = objs[0]["embedding"]
@@ -1917,7 +1917,7 @@ async def face_login(data: FaceRegister):
             raise HTTPException(status_code=400, detail=f"Failed to extract face embedding: {str(e)}")
 
         # Retrieve stored face templates from DB
-        templates_cursor = db.face_embeddings.find({"model_name": "VGG-Face"})
+        templates_cursor = db.face_embeddings.find({"model_name": "Facenet"})
         templates = await templates_cursor.to_list(100)
         
         if not templates:
@@ -2096,59 +2096,61 @@ app.add_middleware(
 async def seed_admin_face_embeddings(admin_id: str):
     logger.info("Starting admin face recognition embeddings seeding...")
     try:
+        # Check if embeddings are already seeded to prevent blocking startup loops in deployment
+        existing_count = await db.face_embeddings.count_documents({"user_id": admin_id})
+        if existing_count > 0:
+            logger.info(f"Admin face embeddings already seeded ({existing_count} found). Skipping seeding to prevent startup delays.")
+            return
+
         from deepface import DeepFace
-        # Look for the face recognition photos folder in the same directory as server.py
-        photos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face recognition photos")
-            
-        if not os.path.exists(photos_dir):
-            logger.warning(f"Admin photos directory not found at {photos_dir}. Skipping face embedding seeding.")
-            return
 
+        directories_to_scan = ["Face 1", "Face 2"]
         supported_extensions = {".jpg", ".jpeg", ".png", ".webp"}
-        files = [f for f in os.listdir(photos_dir) if os.path.splitext(f.lower())[1] in supported_extensions]
-        
-        if not files:
-            logger.warning(f"No face images found in {photos_dir}.")
-            return
-
         seeded_count = 0
-        for filename in files:
-            file_path = os.path.join(photos_dir, filename)
-            # Check if this file has already been seeded for this admin
-            existing = await db.face_embeddings.find_one({
-                "user_id": admin_id, 
-                "filename": filename, 
-                "model_name": "VGG-Face"
-            })
-            if existing:
-                logger.info(f"Face embedding for {filename} already exists in DB.")
+
+        for folder_name in directories_to_scan:
+            photos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), folder_name)
+                
+            if not os.path.exists(photos_dir):
+                logger.warning(f"Admin photos directory not found at {photos_dir}. Skipping.")
                 continue
+
+            files = [f for f in os.listdir(photos_dir) if os.path.splitext(f.lower())[1] in supported_extensions]
             
-            logger.info(f"Computing face embedding for reference image: {filename}...")
-            try:
-                # Represent returns a list of dicts, each with 'embedding' key
-                objs = DeepFace.represent(img_path=file_path, model_name='VGG-Face', enforce_detection=False)
-                if not objs or len(objs) == 0:
-                    logger.warning(f"Could not extract face representation from {filename}.")
-                    continue
+            if not files:
+                logger.warning(f"No face images found in {photos_dir}.")
+                continue
+
+            for filename in files:
+                file_path = os.path.join(photos_dir, filename)
                 
-                embedding = objs[0]["embedding"]
-                await db.face_embeddings.update_one(
-                    {"user_id": admin_id, "filename": filename, "model_name": "VGG-Face"},
-                    {"$set": {
-                        "user_id": admin_id,
-                        "filename": filename,
-                        "embedding": embedding,
-                        "model_name": "VGG-Face",
-                        "created_at": datetime.now(timezone.utc).isoformat()
-                    }},
-                    upsert=True
-                )
-                seeded_count += 1
-                logger.info(f"Successfully seeded embedding for {filename}.")
-            except Exception as e:
-                logger.error(f"Error computing embedding for {filename}: {str(e)}")
-                
+                logger.info(f"Computing face embedding for reference image: {folder_name}/{filename}...")
+                try:
+                    # Represent returns a list of dicts, each with 'embedding' key
+                    objs = DeepFace.represent(img_path=file_path, model_name='Facenet', enforce_detection=False)
+                    if not objs or len(objs) == 0:
+                        logger.warning(f"Could not extract face representation from {folder_name}/{filename}.")
+                        continue
+                    
+                    embedding = objs[0]["embedding"]
+                    # Use folder_name + filename to ensure uniqueness if filenames overlap
+                    unique_filename = f"{folder_name}_{filename}"
+                    await db.face_embeddings.update_one(
+                        {"user_id": admin_id, "filename": unique_filename, "model_name": "Facenet"},
+                        {"$set": {
+                            "user_id": admin_id,
+                            "filename": unique_filename,
+                            "embedding": embedding,
+                            "model_name": "Facenet",
+                            "created_at": datetime.now(timezone.utc).isoformat()
+                        }},
+                        upsert=True
+                    )
+                    seeded_count += 1
+                    logger.info(f"Successfully seeded embedding for {folder_name}/{filename}.")
+                except Exception as e:
+                    logger.error(f"Error computing embedding for {folder_name}/{filename}: {str(e)}")
+                    
         logger.info(f"Finished seeding admin face embeddings. Total newly seeded: {seeded_count}")
     except Exception as e:
         logger.error(f"Failed to seed admin face embeddings: {str(e)}")
