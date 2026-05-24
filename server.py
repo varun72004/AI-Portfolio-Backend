@@ -2088,7 +2088,7 @@ frontend_url = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:3000')
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=[frontend_url, "http://localhost:3000", "http://127.0.0.1:3000"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
